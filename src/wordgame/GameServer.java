@@ -12,9 +12,9 @@ public class GameServer {
 
 
   private void serverStart() {
-    // Change to src/full.txt for full game. There are a few wordlist options currently
-    wordList = new WordList("src/test.txt");
-
+    // Change to "full.txt" or "test.txt" as desired; WordList will
+    // try to locate it in src, parent, etc.
+    wordList = new WordList("test.txt");
     secret = wordList.getRandom();
     Feedback fb;
 

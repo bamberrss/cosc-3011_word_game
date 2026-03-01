@@ -5,11 +5,12 @@ import java.util.Scanner;
 class Game {
 
     private Word secret;
-    private WordList wordList;
 
     private void start() {
-        // Change to src/full.txt for full game. test.txt is a placeholder for testing only.
-        WordList wordList = new WordList("src/full.txt");
+        // Change to "full.txt" or "test.txt" as needed.  WordList will
+        // resolve the correct path whether we run from the project root
+        // or from the src directory.
+        WordList wordList = new WordList("full.txt");
 
         secret = wordList.getRandom();
         Feedback fb;
