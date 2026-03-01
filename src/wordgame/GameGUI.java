@@ -20,7 +20,10 @@ import java.util.Map;
  */
 public class GameGUI extends JFrame {
     private Word secret;
-    private WordList wordList;
+    // no wordList field; logic lives in Game
+
+    // reference to game logic object (injected)
+    private Game game;
 
     private JTextField[] guessBoxes;  // 5 boxes for 5-letter word
     private JTextPane feedbackArea;
@@ -28,10 +31,14 @@ public class GameGUI extends JFrame {
     private Map<Character, JButton> keyboardButtons;
     private Map<Character, String> letterStatus;  // 'G', 'Y', 'X', or null
 
-    public GameGUI() {
+    // network support
+    private GameClient networkClient;
+    private boolean networkMode = false;
+
+    public GameGUI(Game game) {
         super("Wordle - Guess the Word");
-        wordList = new WordList("test.txt");
-        secret = wordList.getRandom();
+        this.game = game;
+        this.secret = game.getSecret();
         guessBoxes = new JTextField[5];
         keyboardButtons = new HashMap<>();
         letterStatus = new HashMap<>();
@@ -42,6 +49,7 @@ public class GameGUI extends JFrame {
         }
 
         initComponents();
+        createMenuBar();
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(800, 600);
         setLocationRelativeTo(null);
@@ -133,6 +141,8 @@ public class GameGUI extends JFrame {
         guessButton = new JButton("Submit");
         guessButton.addActionListener(e -> handleGuess());
         panel.add(guessButton);
+
+        // network controls to show usage of GameServer/GameClient
 
         return panel;
     }
@@ -254,7 +264,8 @@ public class GameGUI extends JFrame {
         }
 
         String guess = guessText.toString();
-        Feedback fb = new Word(guess).compareTo(secret);
+        // delegate to game object for logic
+        Feedback fb = game.makeGuess(guess);
         String status = fb.getLetterStatus();
 
         // Update feedback display with colored letters
@@ -360,7 +371,43 @@ public class GameGUI extends JFrame {
         btn.setFont(new Font("Arial", Font.BOLD, 12));
     }
 
+    /**
+     * Build a simple menu bar with network options.
+     */
+    private void createMenuBar() {
+        JMenuBar menubar = new JMenuBar();
+        JMenu networkMenu = new JMenu("Network");
+
+        JMenuItem hostItem = new JMenuItem("Host Game");
+        hostItem.addActionListener(e -> {
+            // start server in background thread
+            new Thread(() -> new GameServer().serverStart()).start();
+            JOptionPane.showMessageDialog(this, "Server started (console output).", "Network", JOptionPane.INFORMATION_MESSAGE);
+        });
+
+        JMenuItem joinItem = new JMenuItem("Join Game...");
+        joinItem.addActionListener(e -> {
+            String host = JOptionPane.showInputDialog(this, "Enter server host (default localhost):", "localhost");
+            if (host == null || host.isEmpty()) return;
+            try {
+                networkClient = new GameClient(host, 5000);
+                networkMode = true;
+                JOptionPane.showMessageDialog(this, "Connected to server. Type guesses as usual.", "Network", JOptionPane.INFORMATION_MESSAGE);
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "Failed to connect: " + ex.getMessage(), "Network Error", JOptionPane.ERROR_MESSAGE);
+            }
+        });
+
+        networkMenu.add(hostItem);
+        networkMenu.add(joinItem);
+        menubar.add(networkMenu);
+        setJMenuBar(menubar);
+    }
+
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new GameGUI());
+        // set up game logic outside of GUI
+        Game game = new Game();
+        game.init("test.txt");
+        SwingUtilities.invokeLater(() -> new GameGUI(game));
     }
 }

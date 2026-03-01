@@ -11,7 +11,7 @@ public class GameServer {
   private WordList wordList;
 
 
-  private void serverStart() {
+  public void serverStart() {
     // Change to "full.txt" or "test.txt" as desired; WordList will
     // try to locate it in src, parent, etc.
     wordList = new WordList("test.txt");
