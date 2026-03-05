@@ -9,405 +9,298 @@ import javax.swing.text.DocumentFilter;
 import javax.swing.text.SimpleAttributeSet;
 import javax.swing.text.StyleConstants;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
-import java.awt.event.KeyListener;
+import java.io.Closeable;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Wordle-style GUI with on-screen keyboard showing letter states.
- * Green = correct position, Yellow = wrong position, Gray = not in word
- */
 public class GameGUI extends JFrame {
+    private static final int LEN = 5;
+    private static final Color GREEN = new Color(34, 177, 76), YELLOW = new Color(255, 193, 7), GRAY = new Color(120, 120, 120);
+    private static final String[] WORD_FILES = {"src/test.txt", "test.txt", "../../src/test.txt", "../test.txt", "src/full.txt", "full.txt", "../../src/full.txt", "../full.txt"};
+
     private Word secret;
-    // no wordList field; logic lives in Game
-
-    // reference to game logic object (injected)
-    private Game game;
-
-    private JTextField[] guessBoxes;  // 5 boxes for 5-letter word
+    private final JTextField[] boxes = new JTextField[LEN];
+    private final Map<Character, JButton> keys = new HashMap<>();
+    private final Map<Character, Character> bestStatus = new HashMap<>();
     private JTextPane feedbackArea;
-    private JButton guessButton;
-    private Map<Character, JButton> keyboardButtons;
-    private Map<Character, String> letterStatus;  // 'G', 'Y', 'X', or null
+    private JButton submit;
 
-    // network support
-    private GameClient networkClient;
-    private boolean networkMode = false;
+    private boolean networkMode;
+    private Socket socket;
+    private ObjectOutputStream out;
+    private ObjectInputStream in;
 
     public GameGUI(Game game) {
         super("Wordle - Guess the Word");
-        this.game = game;
-        this.secret = game.getSecret();
-        guessBoxes = new JTextField[5];
-        keyboardButtons = new HashMap<>();
-        letterStatus = new HashMap<>();
-
-        // Initialize all letters as unused
-        for (char c = 'a'; c <= 'z'; c++) {
-            letterStatus.put(c, null);
-        }
-
-        initComponents();
-        createMenuBar();
+        secret = resolveSecret(game);
+        for (char c = 'a'; c <= 'z'; c++) bestStatus.put(c, null);
+        setJMenuBar(buildMenuBar());
+        setContentPane(buildRoot());
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        addWindowListener(new java.awt.event.WindowAdapter() { public void windowClosing(java.awt.event.WindowEvent e) { disconnect(); } });
         setSize(800, 600);
         setLocationRelativeTo(null);
         setVisible(true);
     }
 
-    private void initComponents() {
-        // Title
-        JLabel titleLabel = new JLabel("WORDLE");
-        titleLabel.setFont(new Font("Arial", Font.BOLD, 24));
-        titleLabel.setHorizontalAlignment(JLabel.CENTER);
+    private JPanel buildRoot() {
+        JLabel title = new JLabel("WORDLE", JLabel.CENTER);
+        title.setFont(new Font("Arial", Font.BOLD, 24));
 
-        // Input panel with 5 boxes
-        JPanel inputPanel = createInputPanel();
+        JPanel top = new JPanel(new BorderLayout());
+        top.add(title, BorderLayout.NORTH);
+        top.add(buildInputRow(), BorderLayout.SOUTH);
 
-        // Feedback area
         feedbackArea = new JTextPane();
         feedbackArea.setEditable(false);
         feedbackArea.setFont(new Font("Monospaced", Font.PLAIN, 16));
         feedbackArea.setBackground(new Color(240, 240, 240));
-        JScrollPane scroll = new JScrollPane(feedbackArea,
-                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
-                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
 
-        // Keyboard panel
-        JPanel keyboardPanel = createKeyboardPanel();
-
-        // Layout
-        getContentPane().setLayout(new BorderLayout(10, 10));
-        ((JPanel) getContentPane()).setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-
-        JPanel topPanel = new JPanel(new BorderLayout());
-        topPanel.add(titleLabel, BorderLayout.NORTH);
-        topPanel.add(inputPanel, BorderLayout.SOUTH);
-
-        getContentPane().add(topPanel, BorderLayout.NORTH);
-        getContentPane().add(scroll, BorderLayout.CENTER);
-        getContentPane().add(keyboardPanel, BorderLayout.SOUTH);
+        JPanel root = new JPanel(new BorderLayout(10, 10));
+        root.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        root.add(top, BorderLayout.NORTH);
+        root.add(new JScrollPane(feedbackArea, JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER), BorderLayout.CENTER);
+        root.add(buildKeyboard(), BorderLayout.SOUTH);
+        return root;
     }
 
-    private JPanel createInputPanel() {
-        JPanel panel = new JPanel();
-        panel.setLayout(new FlowLayout(FlowLayout.CENTER, 10, 10));
-        panel.add(new JLabel("Enter guess:"));
-
-        for (int i = 0; i < 5; i++) {
-            guessBoxes[i] = new JTextField(1);
-            guessBoxes[i].setFont(new Font("Arial", Font.BOLD, 28));
-            guessBoxes[i].setHorizontalAlignment(JTextField.CENTER);
-            guessBoxes[i].setPreferredSize(new Dimension(50, 50));
-            guessBoxes[i].setMaximumSize(new Dimension(50, 50));
-            guessBoxes[i].setBorder(new LineBorder(Color.BLACK, 2));
-
-            // Attach a document filter to allow only single letters
-            AbstractDocument doc = (AbstractDocument) guessBoxes[i].getDocument();
-            doc.setDocumentFilter(new SingleLetterFilter(i));
-
-            // Add key listener for navigation and Enter submission
-            final int boxIndex = i;
-            guessBoxes[i].addKeyListener(new KeyListener() {
-                @Override
-                public void keyTyped(KeyEvent e) {}
-
-                @Override
-                public void keyPressed(KeyEvent e) {
-                    if (e.getKeyCode() == KeyEvent.VK_BACK_SPACE) {
-                        if (guessBoxes[boxIndex].getText().isEmpty() && boxIndex > 0) {
-                            guessBoxes[boxIndex - 1].requestFocus();
-                            guessBoxes[boxIndex - 1].selectAll();
-                        }
-                    } else if (e.getKeyCode() == KeyEvent.VK_RIGHT && boxIndex < 4) {
-                        if (!guessBoxes[boxIndex].getText().isEmpty()) {
-                            guessBoxes[boxIndex + 1].requestFocus();
-                        }
-                    } else if (e.getKeyCode() == KeyEvent.VK_LEFT && boxIndex > 0) {
-                        guessBoxes[boxIndex - 1].requestFocus();
-                    } else if (e.getKeyCode() == KeyEvent.VK_ENTER) {
-                        handleGuess();
+    private JPanel buildInputRow() {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 10));
+        row.add(new JLabel("Enter guess:"));
+        for (int i = 0; i < LEN; i++) {
+            JTextField box = new JTextField(1);
+            box.setFont(new Font("Arial", Font.BOLD, 28));
+            box.setHorizontalAlignment(JTextField.CENTER);
+            box.setPreferredSize(new Dimension(50, 50));
+            box.setMaximumSize(new Dimension(50, 50));
+            box.setBorder(new LineBorder(Color.BLACK, 2));
+            ((AbstractDocument) box.getDocument()).setDocumentFilter(new LetterFilter(i));
+            int index = i;
+            box.addKeyListener(new KeyAdapter() {
+                @Override public void keyPressed(KeyEvent e) {
+                    switch (e.getKeyCode()) {
+                        case KeyEvent.VK_BACK_SPACE -> { if (boxes[index].getText().isEmpty() && index > 0) { boxes[index - 1].requestFocus(); boxes[index - 1].selectAll(); } }
+                        case KeyEvent.VK_RIGHT -> { if (index < LEN - 1 && !boxes[index].getText().isEmpty()) boxes[index + 1].requestFocus(); }
+                        case KeyEvent.VK_LEFT -> { if (index > 0) boxes[index - 1].requestFocus(); }
+                        case KeyEvent.VK_ENTER -> handleGuess();
                     }
                 }
-
-                @Override
-                public void keyReleased(KeyEvent e) {}
             });
-
-            panel.add(guessBoxes[i]);
+            boxes[i] = box;
+            row.add(box);
         }
-
-        guessButton = new JButton("Submit");
-        guessButton.addActionListener(e -> handleGuess());
-        panel.add(guessButton);
-
-        // network controls to show usage of GameServer/GameClient
-
-        return panel;
-    }
-
-    private JPanel createKeyboardPanel() {
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBorder(BorderFactory.createTitledBorder("Alphabet"));
-
-        // Three rows for QWERTY keyboard layout
-        String[] row1 = {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"};
-        String[] row2 = {"a", "s", "d", "f", "g", "h", "j", "k", "l"};
-        String[] row3 = {"z", "x", "c", "v", "b", "n", "m"};
-
-        panel.add(createKeyboardRow(row1));
-        panel.add(Box.createVerticalStrut(5));
-        panel.add(createKeyboardRow(row2));
-        panel.add(Box.createVerticalStrut(5));
-        panel.add(createKeyboardRow(row3));
-
-        return panel;
-    }
-
-    private JPanel createKeyboardRow(String[] letters) {
-        JPanel row = new JPanel();
-        row.setLayout(new FlowLayout(FlowLayout.CENTER, 3, 3));
-
-        for (String letterStr : letters) {
-            char letter = letterStr.charAt(0);
-            JButton btn = new JButton(letterStr.toUpperCase());
-            btn.setFont(new Font("Arial", Font.BOLD, 12));
-            btn.setPreferredSize(new Dimension(35, 35));
-            btn.setBackground(new Color(200, 200, 200));
-            btn.setOpaque(true);
-            btn.setBorder(new LineBorder(Color.BLACK, 1));
-            btn.setEnabled(false);
-
-            keyboardButtons.put(letter, btn);
-            row.add(btn);
-        }
-
+        submit = new JButton("Submit");
+        submit.addActionListener(e -> handleGuess());
+        row.add(submit);
         return row;
     }
 
-    /**
-     * Document filter that allows only a single letter per box
-     * and auto-advances to the next box.
-     */
-    private class SingleLetterFilter extends DocumentFilter {
-        private int boxIndex;
+    private JPanel buildKeyboard() {
+        JPanel keyboard = new JPanel();
+        keyboard.setLayout(new BoxLayout(keyboard, BoxLayout.Y_AXIS));
+        keyboard.setBorder(BorderFactory.createTitledBorder("Alphabet"));
+        keyboard.add(buildKeyRow("qwertyuiop")); keyboard.add(Box.createVerticalStrut(5));
+        keyboard.add(buildKeyRow("asdfghjkl")); keyboard.add(Box.createVerticalStrut(5));
+        keyboard.add(buildKeyRow("zxcvbnm"));
+        return keyboard;
+    }
 
-        SingleLetterFilter(int boxIndex) {
-            this.boxIndex = boxIndex;
+    private JPanel buildKeyRow(String letters) {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.CENTER, 3, 3));
+        for (char ch : letters.toCharArray()) {
+            JButton button = new JButton(String.valueOf(Character.toUpperCase(ch)));
+            button.setFont(new Font("Arial", Font.BOLD, 12));
+            button.setPreferredSize(new Dimension(35, 35));
+            button.setBackground(new Color(200, 200, 200));
+            button.setOpaque(true);
+            button.setBorder(new LineBorder(Color.BLACK, 1));
+            button.setEnabled(false);
+            keys.put(ch, button);
+            row.add(button);
         }
+        return row;
+    }
 
-        @Override
-        public void insertString(FilterBypass fb, int offset, String string, AttributeSet attr)
-                throws BadLocationException {
-            if (string == null || string.isEmpty()) return;
-
-            // Only allow letters
-            string = string.replaceAll("[^a-zA-Z]", "").toLowerCase();
-            if (string.isEmpty()) return;
-
-            // Reject if box already has a character
-            if (fb.getDocument().getLength() >= 1) {
-                return;
-            }
-
-            // Only take the first character
-            char c = string.charAt(0);
-            super.insertString(fb, offset, String.valueOf(c), attr);
-
-            // Auto-advance to next box if not the last
-            if (boxIndex < 4) {
-                SwingUtilities.invokeLater(() -> guessBoxes[boxIndex + 1].requestFocus());
-            }
-        }
-
-        @Override
-        public void replace(FilterBypass fb, int offset, int length, String string, AttributeSet attr)
-                throws BadLocationException {
-            if (string == null) string = "";
-
-            // Only allow letters
-            string = string.replaceAll("[^a-zA-Z]", "").toLowerCase();
-            if (string.isEmpty()) {
-                // Allow deletion
-                super.replace(fb, offset, length, string, attr);
-                return;
-            }
-
-            // Only take the first character
-            char c = string.charAt(0);
-            
-            // Replace entire content with single character
+    private class LetterFilter extends DocumentFilter {
+        private final int index;
+        private LetterFilter(int index) { this.index = index; }
+        @Override public void insertString(FilterBypass fb, int offset, String text, AttributeSet attrs) throws BadLocationException { replace(fb, offset, 0, text, attrs); }
+        @Override public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs) throws BadLocationException {
+            String normalized = text == null ? "" : text.replaceAll("[^a-zA-Z]", "").toLowerCase();
+            if (normalized.isEmpty()) { fb.replace(offset, length, "", attrs); return; }
             fb.remove(0, fb.getDocument().getLength());
-            fb.insertString(0, String.valueOf(c), attr);
-
-            // Auto-advance to next box if not the last
-            if (boxIndex < 4) {
-                SwingUtilities.invokeLater(() -> guessBoxes[boxIndex + 1].requestFocus());
-            }
+            fb.insertString(0, String.valueOf(normalized.charAt(0)), attrs);
+            if (index < LEN - 1) SwingUtilities.invokeLater(() -> boxes[index + 1].requestFocus());
         }
     }
 
     private void handleGuess() {
-        // Combine all 5 boxes into one word
-        StringBuilder guessText = new StringBuilder();
-        for (JTextField box : guessBoxes) {
-            String text = box.getText().toLowerCase();
-            if (text.isEmpty()) {
-                JOptionPane.showMessageDialog(this,
-                        "Please fill all 5 letter boxes.",
-                        "Incomplete Guess", JOptionPane.WARNING_MESSAGE);
-                return;
-            }
-            guessText.append(text);
-        }
-
-        String guess = guessText.toString();
-        // delegate to game object for logic
-        Feedback fb = game.makeGuess(guess);
-        String status = fb.getLetterStatus();
-
-        // Update feedback display with colored letters
+        String guess = readGuess();
+        if (guess == null) return;
+        Feedback fb = makeGuess(guess);
+        String status = normalizeStatus(fb.colors);
         appendColoredGuess(guess, status);
-
-        // Update keyboard letter states
-        for (int i = 0; i < guess.length(); i++) {
-            char letter = guess.charAt(i);
-            char statusChar = status.charAt(i);
-
-            // Update letter state if this status is better than previous
-            String currentStatus = letterStatus.get(letter);
-            if (shouldUpdateStatus(currentStatus, statusChar)) {
-                letterStatus.put(letter, String.valueOf(statusChar));
-                updateKeyboardButtonColor(letter, statusChar);
-            }
-        }
-
+        updateKeyboard(guess, status);
         if (fb.isCorrect()) {
-            JOptionPane.showMessageDialog(this, "🎉 YOU WIN! The word was " + secret.toString().toUpperCase(),
-                    "Congratulations", JOptionPane.INFORMATION_MESSAGE);
-            for (JTextField box : guessBoxes) {
-                box.setEditable(false);
-            }
-            guessButton.setEnabled(false);
-        } else {
-            // Clear boxes for next guess
-            for (JTextField box : guessBoxes) {
-                box.setText("");
-            }
-            guessBoxes[0].requestFocus();
+            JOptionPane.showMessageDialog(this, "🎉 YOU WIN! The word was " + (secret == null ? "(unknown)" : secret.toString().toUpperCase()), "Congratulations", JOptionPane.INFORMATION_MESSAGE);
+            for (JTextField box : boxes) box.setEditable(false);
+            submit.setEnabled(false);
+            return;
         }
+        for (JTextField box : boxes) box.setText("");
+        boxes[0].requestFocus();
     }
 
-    /**
-     * Append a colored guess to the feedback area.
-     * Each letter is colored based on its status.
-     */
+    private String readGuess() {
+        StringBuilder guess = new StringBuilder(LEN);
+        for (JTextField box : boxes) {
+            String value = box.getText().trim().toLowerCase();
+            if (value.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "Please fill all 5 letter boxes.", "Incomplete Guess", JOptionPane.WARNING_MESSAGE);
+                return null;
+            }
+            guess.append(value.charAt(0));
+        }
+        return guess.toString();
+    }
+
+    private Feedback makeGuess(String guessText) {
+        if (networkMode && out != null && in != null) {
+            try {
+                out.writeObject(new Word(guessText));
+                out.flush();
+                Object response = in.readObject();
+                if (response instanceof Feedback) return (Feedback) response;
+            } catch (Exception exception) {
+                disconnect();
+                JOptionPane.showMessageDialog(this, "Network guess failed: " + exception.getMessage(), "Network Error", JOptionPane.ERROR_MESSAGE);
+            }
+        }
+        if (secret == null) secret = resolveSecret(new Game());
+        return secret.compareTo(new Word(guessText));
+    }
+
     private void appendColoredGuess(String guess, String status) {
         try {
-            int docLength = feedbackArea.getDocument().getLength();
-            
+            int start = feedbackArea.getDocument().getLength();
             for (int i = 0; i < guess.length(); i++) {
-                char letter = Character.toUpperCase(guess.charAt(i));
-                char statusChar = status.charAt(i);
-
+                char code = status.charAt(i);
                 SimpleAttributeSet attrs = new SimpleAttributeSet();
-                Color bgColor;
-                Color fgColor;
-
-                if (statusChar == 'G') {
-                    bgColor = new Color(34, 177, 76);  // Green
-                    fgColor = Color.WHITE;
-                } else if (statusChar == 'Y') {
-                    bgColor = new Color(255, 193, 7);  // Yellow
-                    fgColor = Color.BLACK;
-                } else {  // 'X'
-                    bgColor = new Color(120, 120, 120);  // Gray
-                    fgColor = Color.WHITE;
-                }
-
-                StyleConstants.setBackground(attrs, bgColor);
-                StyleConstants.setForeground(attrs, fgColor);
+                StyleConstants.setBackground(attrs, code == 'G' ? GREEN : code == 'Y' ? YELLOW : GRAY);
+                StyleConstants.setForeground(attrs, code == 'Y' ? Color.BLACK : Color.WHITE);
                 StyleConstants.setFontSize(attrs, 20);
                 StyleConstants.setBold(attrs, true);
-
-                feedbackArea.getDocument().insertString(docLength + i, String.valueOf(letter), attrs);
+                feedbackArea.getDocument().insertString(start + i, String.valueOf(Character.toUpperCase(guess.charAt(i))), attrs);
             }
-            
-            // Add newline after the guess
             feedbackArea.getDocument().insertString(feedbackArea.getDocument().getLength(), "\n", null);
-        } catch (BadLocationException e) {
-            e.printStackTrace();
+        } catch (BadLocationException exception) {
+            JOptionPane.showMessageDialog(this, "Unable to render feedback: " + exception.getMessage(), "Render Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    /**
-     * Determine if we should update the letter state.
-     * Green > Yellow > Gray
-     */
-    private boolean shouldUpdateStatus(String current, char newStatus) {
-        if (current == null) return true;
-        char currentChar = current.charAt(0);
-        if (newStatus == 'G') return true;  // Green always wins
-        if (newStatus == 'Y' && currentChar != 'G') return true;  // Yellow wins over gray
-        return false;
-    }
-
-    private void updateKeyboardButtonColor(char letter, char status) {
-        JButton btn = keyboardButtons.get(letter);
-        if (btn == null) return;
-
-        Color color;
-        if (status == 'G') {
-            color = new Color(34, 177, 76);  // Green
-        } else if (status == 'Y') {
-            color = new Color(255, 193, 7);  // Yellow
-        } else {
-            color = new Color(120, 120, 120);  // Gray
+    private void updateKeyboard(String guess, String status) {
+        for (int i = 0; i < guess.length(); i++) {
+            char letter = guess.charAt(i), next = status.charAt(i);
+            Character current = bestStatus.get(letter);
+            if (current == null || next == 'G' || (next == 'Y' && current != 'G')) {
+                bestStatus.put(letter, next);
+                JButton key = keys.get(letter);
+                if (key != null) {
+                    key.setBackground(next == 'G' ? GREEN : next == 'Y' ? YELLOW : GRAY);
+                    key.setForeground(next == 'Y' ? Color.BLACK : Color.WHITE);
+                }
+            }
         }
-        btn.setBackground(color);
-        btn.setForeground(Color.WHITE);
-        btn.setFont(new Font("Arial", Font.BOLD, 12));
     }
 
-    /**
-     * Build a simple menu bar with network options.
-     */
-    private void createMenuBar() {
-        JMenuBar menubar = new JMenuBar();
-        JMenu networkMenu = new JMenu("Network");
+    private String normalizeStatus(char[] colors) {
+        StringBuilder status = new StringBuilder(colors.length);
+        for (char c : colors) status.append((c == 'G' || c == 'Y' || c == 'B') ? c : 'B');
+        return status.toString();
+    }
 
-        JMenuItem hostItem = new JMenuItem("Host Game");
-        hostItem.addActionListener(e -> {
-            // start server in background thread
-            new Thread(() -> new GameServer().serverStart()).start();
+    private JMenuBar buildMenuBar() {
+        JMenuItem host = new JMenuItem("Host Game");
+        host.addActionListener(e -> {
+            new Thread(() -> {
+                try {
+                    Method serverStart = GameServer.class.getDeclaredMethod("serverStart");
+                    serverStart.setAccessible(true);
+                    serverStart.invoke(new GameServer());
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Failed to start server: " + ex.getMessage(), "Network Error", JOptionPane.ERROR_MESSAGE));
+                }
+            }, "game-server-thread").start();
             JOptionPane.showMessageDialog(this, "Server started (console output).", "Network", JOptionPane.INFORMATION_MESSAGE);
         });
 
-        JMenuItem joinItem = new JMenuItem("Join Game...");
-        joinItem.addActionListener(e -> {
-            String host = JOptionPane.showInputDialog(this, "Enter server host (default localhost):", "localhost");
-            if (host == null || host.isEmpty()) return;
+        JMenuItem join = new JMenuItem("Join Game...");
+        join.addActionListener(e -> {
+            String hostInput = JOptionPane.showInputDialog(this, "Enter server host (default localhost):", "localhost");
+            if (hostInput == null) return;
+            String hostName = hostInput.trim().isEmpty() ? "localhost" : hostInput.trim();
+            disconnect();
             try {
-                networkClient = new GameClient(host, 5000);
+                socket = new Socket(hostName, 5000);
+                out = new ObjectOutputStream(socket.getOutputStream());
+                in = new ObjectInputStream(socket.getInputStream());
                 networkMode = true;
                 JOptionPane.showMessageDialog(this, "Connected to server. Type guesses as usual.", "Network", JOptionPane.INFORMATION_MESSAGE);
             } catch (Exception ex) {
+                disconnect();
                 JOptionPane.showMessageDialog(this, "Failed to connect: " + ex.getMessage(), "Network Error", JOptionPane.ERROR_MESSAGE);
             }
         });
 
-        networkMenu.add(hostItem);
-        networkMenu.add(joinItem);
-        menubar.add(networkMenu);
-        setJMenuBar(menubar);
+        JMenu menu = new JMenu("Network");
+        menu.add(host);
+        menu.add(join);
+        JMenuBar bar = new JMenuBar();
+        bar.add(menu);
+        return bar;
+    }
+
+    private Word resolveSecret(Game game) {
+        try {
+            Field field = game.getClass().getDeclaredField("secret");
+            field.setAccessible(true);
+            Object value = field.get(game);
+            if (value instanceof Word) return (Word) value;
+        } catch (Exception ignored) { }
+
+        for (String file : WORD_FILES) {
+            try {
+                if (Files.exists(Path.of(file))) return new WordList(file).getRandom();
+            } catch (Exception ignored) { }
+        }
+        return new Word("apple");
+    }
+
+    private void disconnect() {
+        networkMode = false;
+        closeQuietly(in);
+        closeQuietly(out);
+        closeQuietly(socket);
+        in = null;
+        out = null;
+        socket = null;
+    }
+
+    private void closeQuietly(Closeable closeable) {
+        if (closeable == null) return;
+        try { closeable.close(); } catch (Exception ignored) { }
     }
 
     public static void main(String[] args) {
-        // set up game logic outside of GUI
-        Game game = new Game();
-        game.init("test.txt");
-        SwingUtilities.invokeLater(() -> new GameGUI(game));
+        SwingUtilities.invokeLater(() -> new GameGUI(new Game()));
     }
 }
