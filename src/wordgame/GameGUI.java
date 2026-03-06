@@ -33,6 +33,7 @@ public class GameGUI extends JFrame {
     private final Map<Character, Character> bestStatus = new HashMap<>();
     private JTextPane feedbackArea;
     private JButton submit;
+    private JButton newGame;
 
     private boolean networkMode;
     private Socket socket;
@@ -101,6 +102,10 @@ public class GameGUI extends JFrame {
         submit = new JButton("Submit");
         submit.addActionListener(e -> handleGuess());
         row.add(submit);
+
+        newGame = new JButton("New Game");
+        newGame.addActionListener(e -> resetGame());
+        row.add(newGame);
         return row;
     }
 
@@ -191,20 +196,42 @@ public class GameGUI extends JFrame {
 
     private void appendColoredGuess(String guess, String status) {
         try {
-            int start = feedbackArea.getDocument().getLength();
             for (int i = 0; i < guess.length(); i++) {
                 char code = status.charAt(i);
                 SimpleAttributeSet attrs = new SimpleAttributeSet();
                 StyleConstants.setBackground(attrs, code == 'G' ? GREEN : code == 'Y' ? YELLOW : GRAY);
                 StyleConstants.setForeground(attrs, code == 'Y' ? Color.BLACK : Color.WHITE);
+                StyleConstants.setFontFamily(attrs, Font.MONOSPACED);
                 StyleConstants.setFontSize(attrs, 20);
                 StyleConstants.setBold(attrs, true);
-                feedbackArea.getDocument().insertString(start + i, String.valueOf(Character.toUpperCase(guess.charAt(i))), attrs);
+                feedbackArea.getDocument().insertString(feedbackArea.getDocument().getLength(), " " + Character.toUpperCase(guess.charAt(i)) + " ", attrs);
             }
             feedbackArea.getDocument().insertString(feedbackArea.getDocument().getLength(), "\n", null);
         } catch (BadLocationException exception) {
             JOptionPane.showMessageDialog(this, "Unable to render feedback: " + exception.getMessage(), "Render Error", JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    private void resetGame() {
+        secret = resolveSecret(new Game());
+        feedbackArea.setText("");
+
+        for (JTextField box : boxes) {
+            box.setText("");
+            box.setEditable(true);
+        }
+
+        for (char c = 'a'; c <= 'z'; c++) {
+            bestStatus.put(c, null);
+            JButton key = keys.get(c);
+            if (key != null) {
+                key.setBackground(new Color(200, 200, 200));
+                key.setForeground(Color.BLACK);
+            }
+        }
+
+        submit.setEnabled(true);
+        boxes[0].requestFocus();
     }
 
     private void updateKeyboard(String guess, String status) {
